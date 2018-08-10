@@ -13,6 +13,9 @@ import (
 	log "github.com/golang/glog"
 	bencode "github.com/jackpal/bencode-go"
 	"github.com/nictuku/nettools"
+
+        "github.com/kavu/go_reuseport"
+        mrand "math/rand"
 )
 
 // Search a node again after some time.
@@ -167,13 +170,13 @@ type responseType struct {
 }
 
 // sendMsg bencodes the data in 'query' and sends it to the remote node.
-func sendMsg(conn *net.UDPConn, raddr net.UDPAddr, query interface{}) {
+func sendMsg(conn []*net.UDPConn, raddr net.UDPAddr, query interface{}) {
 	totalSent.Add(1)
 	var b bytes.Buffer
 	if err := bencode.Marshal(&b, query); err != nil {
 		return
 	}
-	if n, err := conn.WriteToUDP(b.Bytes(), &raddr); err != nil {
+	if n, err := conn[mrand.Intn(len(conn))].WriteToUDP(b.Bytes(), &raddr); err != nil {
 		log.V(3).Infof("DHT: node write failed to %+v, error=%s", raddr, err)
 	} else {
 		totalWrittenBytes.Add(int64(n))
@@ -220,7 +223,7 @@ type packetType struct {
 
 func listen(addr string, listenPort int, proto string) (socket *net.UDPConn, err error) {
 	log.V(3).Infof("DHT: Listening for peers on IP: %s port: %d Protocol=%s\n", addr, listenPort, proto)
-	listener, err := net.ListenPacket(proto, addr+":"+strconv.Itoa(listenPort))
+	listener, err := reuseport.ListenPacket(proto, addr+":"+strconv.Itoa(listenPort))
 	if err != nil {
 		log.V(3).Infof("DHT: Listen failed:", err)
 	}

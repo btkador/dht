@@ -48,7 +48,7 @@ func main() {
 	d, err := dht.New(&dht.Config{
                 Address:                 "",
                 Port:                    0, // Picks a random port.
-                NumTargetPeers:          5000,
+                NumTargetPeers:          5,
                 DHTRouters:              "router.magnets.im:6881,router.bittorrent.com:6881,dht.transmissionbt.com:6881",
                 MaxNodes:                500,
                 CleanupPeriod:           15 * time.Minute,
@@ -61,6 +61,7 @@ func main() {
                 ThrottlerTrackedClients: 1000,
                 UDPProto:                "udp4",
                 MaxSearchQueries:        1000,
+		ConnPoolSize:            5,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "New DHT error: %v", err)
@@ -76,8 +77,11 @@ func main() {
 	}
 	go drainresults(d)
 
+	time.Sleep(10 * time.Second)
+
 	for {
-		d.PeersRequest(string(ih), false)
+		fmt.Sprintf("%v",ih)
+//		d.PeersRequest(string(ih), false)
 		time.Sleep(5 * time.Minute)
 	}
 }

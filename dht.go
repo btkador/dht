@@ -103,6 +103,8 @@ type Config struct {
 	// If a node replies to get_peer requests for more than MaxNodeDownloads different InfoHashes it's
 	// spammy and we blacklist it
 	MaxNodeDownloads int
+	// Number of concurrent listeners on same port (default 1)
+        ConnPoolSize int
 }
 
 // Creates a *Config populated with default values.
@@ -126,6 +128,7 @@ func NewConfig() *Config {
 		MaxSearchQueries:        -1,
 		SearchCntExpire:         10 * time.Minute,
 		MaxNodeDownloads:        -1,
+                ConnPoolSize:            1,
 	}
 }
 
@@ -163,7 +166,7 @@ type DHT struct {
 	config                 Config
 	routingTable           *routingTable
 	peerStore              *peerStore
-	conn                   *net.UDPConn
+	conn                   []*net.UDPConn
 	Logger                 Logger
 	exploredNeighborhood   bool
 	remoteNodeAcquaintance chan string
@@ -353,16 +356,24 @@ func (d *DHT) Run() error {
 // initSocket initializes the udp socket
 // listening to incoming dht requests
 func (d *DHT) initSocket() (err error) {
-	d.conn, err = listen(d.config.Address, d.config.Port, d.config.UDPProto)
-	if err != nil {
-		return err
+	// set to 1 if unset (to be backwards compatible)
+	if d.config.ConnPoolSize < 1 {
+		d.config.ConnPoolSize = 1
 	}
+        for i := 1; i <= d.config.ConnPoolSize ; i++ {
+                conn, err := listen(d.config.Address, d.config.Port, d.config.UDPProto)
+                if err != nil {
+                        return err
+                }
 
-	// Update the stored port number in case it was set 0, meaning it was
-	// set automatically by the system
-	d.config.Port = d.conn.LocalAddr().(*net.UDPAddr).Port
-	return nil
+                d.conn = append(d.conn,conn)
+                // Update the stored port number in case it was set 0, meaning it was
+                // set automatically by the system
+                d.config.Port = conn.LocalAddr().(*net.UDPAddr).Port
+        }
+        return nil
 }
+
 
 func (d *DHT) bootstrap() {
 	// Bootstrap the network (only if there are configured dht routers).
@@ -385,20 +396,24 @@ func (d *DHT) bootstrap() {
 // is called from another go routine.
 func (d *DHT) loop() {
 	// Close socket
-	defer d.conn.Close()
+        for _, conn:= range d.conn {
+                defer conn.Close()
+        }
 
 	// There is goroutine pushing and one popping items out of the arena.
 	// One passes work to the other. So there is little contention in the
 	// arena, so it doesn't need many items (it used to have 500!). If
 	// readFromSocket or the packet processing ever need to be
 	// parallelized, this would have to be bumped.
-	bytesArena := newArena(maxUDPPacketSize, 3)
-	socketChan := make(chan packetType)
+	bytesArena := newArena(maxUDPPacketSize, 3*d.config.ConnPoolSize)
+	socketChan := make(chan packetType,1024*1024)
 	d.wg.Add(1)
-	go func() {
-		defer d.wg.Done()
-		readFromSocket(d.conn, socketChan, bytesArena, d.stop)
-	}()
+        for i, conn := range d.conn {
+                go func(i int) {
+                        defer d.wg.Done()
+                        readFromSocket(conn, socketChan, bytesArena, d.stop)
+                }(i)
+        }
 
 	d.bootstrap()
 

@@ -159,6 +159,7 @@ const (
 // client, such as finding new peers for torrent downloads without requiring a
 // tracker.
 type DHT struct {
+	mux                    sync.Mutex
 	nodeId                 string
 	config                 Config
 	routingTable           *routingTable
@@ -394,12 +395,11 @@ func (d *DHT) loop() {
 	// arena, so it doesn't need many items (it used to have 500!). If
 	// readFromSocket or the packet processing ever need to be
 	// parallelized, this would have to be bumped.
-	bytesArena := newArena(maxUDPPacketSize, 3)
-	socketChan := make(chan packetType)
+	bytesArena := newArena(maxUDPPacketSize, 500)
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
-		readFromSocket(d.conn, socketChan, bytesArena, d.stop)
+		d.readFromSocket(d.conn, bytesArena, d.stop)
 	}()
 
 	d.bootstrap()
@@ -412,31 +412,23 @@ func (d *DHT) loop() {
 		saveTicker = time.Tick(d.config.SavePeriod)
 	}
 
-	var fillTokenBucket <-chan time.Time
-	tokenBucket := d.config.RateLimit
-
-	if d.config.RateLimit < 0 {
-		log.Warning("rate limiting disabled")
-	} else {
-		// Token bucket for limiting the number of packets per second.
-		fillTokenBucket = time.Tick(time.Second / 10)
-		if d.config.RateLimit > 0 && d.config.RateLimit < 10 {
-			// Less than 10 leads to rounding problems.
-			d.config.RateLimit = 10
-		}
-	}
 	log.V(1).Infof("DHT: Starting DHT node %x on port %d.", d.nodeId, d.config.Port)
 
 	for {
 		select {
 		case <-d.stop:
+			d.mux.Lock()
 			log.V(1).Infof("DHT exiting.")
 			d.clientThrottle.Stop()
 			log.Flush()
+			d.mux.Unlock()
 			return
 		case addr := <-d.remoteNodeAcquaintance:
+			d.mux.Lock()
 			d.helloFromPeer(addr)
+			d.mux.Unlock()
 		case req := <-d.peersRequest:
+			d.mux.Lock()
 			// torrent server is asking for more peers for infoHash.  Ask the closest
 			// nodes for directions. The goroutine will write into the
 			// PeersNeededResults channel.
@@ -461,8 +453,10 @@ func (d *DHT) loop() {
 
 				d.getPeers(ih) // I might have enough peers in the peerstore, but no seeds
 			}
+			d.mux.Unlock()
 
 		case req := <-d.nodesRequest:
+			d.mux.Lock()
 			m := map[InfoHash]bool{req.ih: true}
 		L:
 			for {
@@ -477,27 +471,9 @@ func (d *DHT) loop() {
 			for ih, _ := range m {
 				d.findNode(string(ih))
 			}
-
-		case p := <-socketChan:
-			totalRecv.Add(1)
-			if d.config.RateLimit > 0 {
-				if tokenBucket > 0 {
-					d.processPacket(p)
-					tokenBucket -= 1
-				} else {
-					// TODO In the future it might be better to avoid dropping things like ping replies.
-					totalDroppedPackets.Add(1)
-				}
-			} else {
-				d.processPacket(p)
-			}
-			bytesArena.Push(p.b)
-
-		case <-fillTokenBucket:
-			if tokenBucket < d.config.RateLimit {
-				tokenBucket += d.config.RateLimit / 10
-			}
+			d.mux.Unlock()
 		case <-cleanupTicker:
+			d.mux.Lock()
 			needPing := d.routingTable.cleanup(d.config.CleanupPeriod, d.peerStore)
 			d.wg.Add(1)
 			go func() {
@@ -507,18 +483,25 @@ func (d *DHT) loop() {
 			if d.needMoreNodes() {
 				d.bootstrap()
 			}
+			d.mux.Unlock()
 		case node := <-d.pingRequest:
+			d.mux.Lock()
 			d.pingNode(node)
+			d.mux.Unlock()
 		case <-secretRotateTicker:
+			d.mux.Lock()
 			d.tokenSecrets = []string{newTokenSecret(), d.tokenSecrets[0]}
+			d.mux.Unlock()
 		case d.portRequest <- d.config.Port:
 			continue
 		case <-saveTicker:
+			d.mux.Lock()
 			tbl := d.routingTable.reachableNodes()
 			if len(tbl) > 5 {
 				d.store.Remotes = tbl
 				saveStore(*d.store)
 			}
+			d.mux.Unlock()
 		}
 	}
 }
@@ -564,6 +547,61 @@ func (d *DHT) helloFromPeer(addr string) {
 	}
 }
 
+// Read from UDP socket, writes slice of byte into channel.
+func (d *DHT) readFromSocket(socket *net.UDPConn, bytesArena arena, stop chan bool) {
+        var fillTokenBucket <-chan time.Time
+        tokenBucket := d.config.RateLimit
+        if d.config.RateLimit < 0 {
+                log.Warning("rate limiting disabled")
+        } else {
+                // Token bucket for limiting the number of packets per second.
+                fillTokenBucket = time.Tick(time.Second / 10)
+                if d.config.RateLimit > 0 && d.config.RateLimit < 10 {
+                        // Less than 10 leads to rounding problems.
+                        d.config.RateLimit = 10
+                }
+        }
+        for {
+                b := bytesArena.Pop()
+                n, addr, err := socket.ReadFromUDP(b)
+                if err != nil {
+                        log.V(3).Infof("DHT: readResponse error:", err)
+                }
+                b = b[0:n]
+                if n == maxUDPPacketSize {
+                        log.V(3).Infof("DHT: Warning. Received packet with len >= %d, some data may have been discarded.\n", maxUDPPacketSize)
+                }
+                totalReadBytes.Add(int64(n))
+                if n > 0 && err == nil {
+                        p := packetType{b, *addr}
+
+                        if d.config.RateLimit > 0 {
+                                if tokenBucket > 0 {
+                                        go d.processPacket(p)
+                                        tokenBucket -= 1
+                                } else {
+                                        // TODO In the future it might be better to avoid dropping things like ping replies.
+                                        totalDroppedPackets.Add(1)
+                                }
+                        } else {
+                                go d.processPacket(p)
+                        }
+
+                        bytesArena.Push(p.b)
+                }
+
+		select {
+		case <-fillTokenBucket:
+                        if tokenBucket < d.config.RateLimit {
+                                tokenBucket += d.config.RateLimit / 10
+                        }
+		default:
+		}
+
+        }
+}
+
+
 func (d *DHT) processPacket(p packetType) {
 	log.V(5).Infof("DHT processing packet from %v", p.raddr.String())
 	if p.b[0] != 'd' {
@@ -589,9 +627,11 @@ func (d *DHT) processPacket(p packetType) {
 			log.V(3).Infof("DHT received reply from self, id %x", r.A.Id)
 			return
 		}
+		d.mux.Lock()
 		node, addr, existed, err := d.routingTable.hostPortToNode(p.raddr.String(), d.config.UDPProto)
 		if err != nil {
 			log.V(3).Infof("DHT readResponse error processing response: %v", err)
+			d.mux.Unlock()
 			return
 		}
 		if !existed {
@@ -599,6 +639,7 @@ func (d *DHT) processPacket(p packetType) {
 			if d.routingTable.length() < d.config.MaxNodes {
 				d.ping(addr)
 			}
+			d.mux.Unlock()
 			return
 		}
 		// Fix the node ID.
@@ -646,19 +687,24 @@ func (d *DHT) processPacket(p packetType) {
 		} else {
 			log.V(3).Infof("DHT: Unknown query id: %v", r.T)
 		}
+		d.mux.Unlock()
 	case r.Y == "q":
+		d.mux.Lock()
 		if d.config.ClientPerMinuteLimit > 0 && !d.clientThrottle.CheckBlock(p.raddr.IP.String()) {
 			totalPacketsFromBlockedHosts.Add(1)
 			log.V(5).Infof("Node exceeded rate limiter. Dropping packet.")
+			d.mux.Unlock()
 			return
 		}
 		if r.A.Id == d.nodeId {
 			log.V(3).Infof("DHT received packet from self, id %x", r.A.Id)
+			d.mux.Unlock()
 			return
 		}
 		node, addr, existed, err := d.routingTable.hostPortToNode(p.raddr.String(), d.config.UDPProto)
 		if err != nil {
 			log.Warningf("Error readResponse error processing query: %v", err)
+			d.mux.Unlock()
 			return
 		}
 		if !existed {
@@ -669,6 +715,7 @@ func (d *DHT) processPacket(p packetType) {
 		}
 		// don't reply to any queries if in passiveMode
 		if d.config.PassiveMode {
+			d.mux.Unlock()
 			return
 		}
 		log.V(5).Infof("DHT processing %v request", r.Q)
@@ -684,6 +731,7 @@ func (d *DHT) processPacket(p packetType) {
 		default:
 			log.V(3).Infof("DHT: non-implemented handler for type %v", r.Q)
 		}
+		d.mux.Unlock()
 	default:
 		log.V(3).Infof("DHT: Bogus DHT query from %v.", p.raddr)
 	}
@@ -704,7 +752,7 @@ func (d *DHT) pingNode(r *remoteNode) {
 
 	queryArguments := map[string]interface{}{"id": d.nodeId}
 	query := queryMessage{t, "q", "ping", queryArguments}
-	sendMsg(d.conn, r.address, query)
+	go sendMsg(d.conn, r.address, query)
 	totalSentPing.Add(1)
 }
 
@@ -735,7 +783,7 @@ func (d *DHT) getPeersFrom(r *remoteNode, ih InfoHash) {
 		log.V(3).Infof("DHT sending get_peers. nodeID: %x@%v, InfoHash: %x , distance: %x", r.id, r.address, ih, x)
 	}
 	r.lastSearchTime = time.Now()
-	sendMsg(d.conn, r.address, query)
+	go sendMsg(d.conn, r.address, query)
 }
 
 func (d *DHT) findNodeFrom(r *remoteNode, id string) {
@@ -762,7 +810,7 @@ func (d *DHT) findNodeFrom(r *remoteNode, id string) {
 		log.V(3).Infof("DHT sending find_node. nodeID: %x@%v, target ID: %x , distance: %x", r.id, r.address, id, x)
 	}
 	r.lastSearchTime = time.Now()
-	sendMsg(d.conn, r.address, query)
+	go sendMsg(d.conn, r.address, query)
 }
 
 // announcePeer sends a message to the destination address to advertise that
@@ -784,7 +832,7 @@ func (d *DHT) announcePeer(address net.UDPAddr, ih InfoHash, token string) {
 		"token":     token,
 	}
 	query := queryMessage{transId, "q", ty, queryArguments}
-	sendMsg(d.conn, address, query)
+	go sendMsg(d.conn, address, query)
 }
 
 func (d *DHT) hostToken(addr net.UDPAddr, secret string) string {
@@ -832,7 +880,7 @@ func (d *DHT) replyAnnouncePeer(addr net.UDPAddr, node *remoteNode, r responseTy
 		Y: "r",
 		R: map[string]interface{}{"id": d.nodeId},
 	}
-	sendMsg(d.conn, addr, reply)
+	go sendMsg(d.conn, addr, reply)
 }
 
 func (d *DHT) replyGetPeers(addr net.UDPAddr, r responseType) {
@@ -859,7 +907,7 @@ func (d *DHT) replyGetPeers(addr net.UDPAddr, r responseType) {
 	} else {
 		reply.R["nodes"] = d.nodesForInfoHash(ih)
 	}
-	sendMsg(d.conn, addr, reply)
+	go sendMsg(d.conn, addr, reply)
 }
 
 func (d *DHT) nodesForInfoHash(ih InfoHash) string {
@@ -917,7 +965,7 @@ func (d *DHT) replyFindNode(addr net.UDPAddr, r responseType) {
 	}
 	log.V(3).Infof("replyFindNode: Nodes only. Giving %d", len(n))
 	reply.R["nodes"] = strings.Join(n, "")
-	sendMsg(d.conn, addr, reply)
+	go sendMsg(d.conn, addr, reply)
 }
 
 func (d *DHT) replyPing(addr net.UDPAddr, response responseType) {
@@ -927,7 +975,7 @@ func (d *DHT) replyPing(addr net.UDPAddr, response responseType) {
 		Y: "r",
 		R: map[string]interface{}{"id": d.nodeId},
 	}
-	sendMsg(d.conn, addr, reply)
+	go sendMsg(d.conn, addr, reply)
 }
 
 // Process another node's response to a get_peers query. If the response

@@ -60,7 +60,7 @@ type queryType struct {
 
 const (
 	// Once in a while I get a few bigger ones, but meh.
-	maxUDPPacketSize = 4096
+	maxUDPPacketSize = 8192
 	v4nodeContactLen = 26
 	v6nodeContactLen = 38 // some clients seem to send multiples of 38
 	nodeIdLen        = 20
@@ -228,38 +228,6 @@ func listen(addr string, listenPort int, proto string) (socket *net.UDPConn, err
 		socket = listener.(*net.UDPConn)
 	}
 	return
-}
-
-// Read from UDP socket, writes slice of byte into channel.
-func readFromSocket(socket *net.UDPConn, conChan chan packetType, bytesArena arena, stop chan bool) {
-	for {
-		b := bytesArena.Pop()
-		n, addr, err := socket.ReadFromUDP(b)
-		if err != nil {
-			log.V(3).Infof("DHT: readResponse error:", err)
-		}
-		b = b[0:n]
-		if n == maxUDPPacketSize {
-			log.V(3).Infof("DHT: Warning. Received packet with len >= %d, some data may have been discarded.\n", maxUDPPacketSize)
-		}
-		totalReadBytes.Add(int64(n))
-		if n > 0 && err == nil {
-			p := packetType{b, *addr}
-			select {
-			case conChan <- p:
-				continue
-			case <-stop:
-				return
-			}
-		}
-		// Do a non-blocking read of the stop channel and stop this goroutine if the channel
-		// has been closed.
-		select {
-		case <-stop:
-			return
-		default:
-		}
-	}
 }
 
 func bogusId(id string) bool {

@@ -402,7 +402,9 @@ func (d *DHT) loop() {
 		d.readFromSocket(d.conn, bytesArena, d.stop)
 	}()
 
+	d.mux.Lock()
 	d.bootstrap()
+	d.mux.Unlock()
 
 	cleanupTicker := time.Tick(d.config.CleanupPeriod)
 	secretRotateTicker := time.Tick(secretRotatePeriod)

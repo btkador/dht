@@ -278,7 +278,7 @@ func (r *routingTable) cleanup(cleanupPeriod time.Duration, p *peerStore) (needP
 	// If this pauses the server for too long I may have to segment the cleanup.
 	// 2000 nodes: it takes ~12ms
 	// 4000 nodes: ~24ms.
-	log.V(2).Info("DHT: Routing table cleanup took %v - nodes purged: %d", duration,(nodeCntStart-len(r.addresses)))
+	log.V(2).Infof("DHT: Routing table cleanup took %s - nodes purged: %d nodes left: %d",duration,(nodeCntStart-len(r.addresses)),len(r.addresses))
 	return needPing
 }
 

@@ -659,7 +659,7 @@ func (d *DHT) processPacket(p packetType) {
 				totalNodesReached.Add(1)
 			}
 			node.lastResponseTime = time.Now()
-			node.pastQueries[r.T] = query
+			node.pastQueries.Add(r.T,query)
 			d.routingTable.neighborhoodUpkeep(node, d.config.UDPProto, d.peerStore)
 
 			// If this is the first host added to the routing table, attempt a
@@ -988,7 +988,12 @@ func (d *DHT) replyPing(addr net.UDPAddr, response responseType) {
 func (d *DHT) processGetPeerResults(node *remoteNode, resp responseType) {
 	totalRecvGetPeersReply.Add(1)
 
-	query, _ := node.pendingQueries[resp.T]
+	query, ok := node.pendingQueries[resp.T]
+	if !ok {
+		log.Warningf("[processGetPeerResults] can't find transaction for id: %v",resp.T)
+		return
+	}
+
 	if d.peerStore.hasLocalDownload(query.ih) {
 		d.announcePeer(node.address, query.ih, resp.R.Token)
 	}
@@ -1068,7 +1073,12 @@ func (d *DHT) processGetPeerResults(node *remoteNode, resp responseType) {
 					log.Infof("DHT: Got new node reference: %x@%v from %x@%v. Distance: %x.",
 						id, address, node.id, node.address, x)
 				}
-				if _, err := d.routingTable.getOrCreateNode(id, addr, d.config.UDPProto); err == nil && d.needMorePeers(query.ih) {
+				// in case we have already more than MaxNodes check if we need more
+				// peers and create new node only if required
+				if d.routingTable.numNodes() > d.config.MaxNodes && !d.needMorePeers(query.ih) {
+					continue
+				}
+				if _, err := d.routingTable.getOrCreateNode(id, addr, d.config.UDPProto); err == nil {
 					// Re-add this request to the queue. This would in theory
 					// batch similar requests, because new nodes are already
 					// available in the routing table and will be used at the

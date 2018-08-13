@@ -4,7 +4,7 @@ import (
 	"container/ring"
 
 	log "github.com/golang/glog"
-	"github.com/golang/groupcache/lru"
+	"github.com/btkador/dht/lru"
 
 	"github.com/patrickmn/go-cache"
 	"time"

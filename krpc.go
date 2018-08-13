@@ -13,6 +13,7 @@ import (
 	log "github.com/golang/glog"
 	bencode "github.com/jackpal/bencode-go"
 	"github.com/nictuku/nettools"
+	"github.com/btkador/dht/lru"
 )
 
 // Search a node again after some time.
@@ -30,7 +31,7 @@ type remoteNode struct {
 	lastQueryID int
 	// TODO: key by infohash instead?
 	pendingQueries   map[string]*queryType // key: transaction ID
-	pastQueries      map[string]*queryType // key: transaction ID
+	pastQueries      *lru.Cache // key: transaction ID
 	reachable        bool
 	createTime       time.Time
 	lastResponseTime time.Time
@@ -47,7 +48,7 @@ func newRemoteNode(addr net.UDPAddr, id string) *remoteNode {
 		reachable:           false,
 		createTime:          time.Now(),
 		pendingQueries:      map[string]*queryType{},
-		pastQueries:         map[string]*queryType{},
+		pastQueries:         lru.New(1000),
 		activeDownloads:     make(map[InfoHash]bool),
 	}
 }
@@ -115,7 +116,7 @@ func (r *remoteNode) newQuery(transType string) (transId string) {
 // one of the recent queries (not necessarily the last) was about the ih. If
 // the ih is different at each time, it will keep returning false.
 func (r *remoteNode) wasContactedRecently(ih InfoHash) bool {
-	if len(r.pendingQueries) == 0 && len(r.pastQueries) == 0 {
+	if len(r.pendingQueries) == 0 && r.pastQueries.Len() == 0 {
 		return false
 	}
 	if !r.lastResponseTime.IsZero() && time.Since(r.lastResponseTime) > searchRetryPeriod {
@@ -129,11 +130,13 @@ func (r *remoteNode) wasContactedRecently(ih InfoHash) bool {
 	if !r.lastSearchTime.IsZero() && time.Since(r.lastSearchTime) > searchRetryPeriod {
 		return false
 	}
-	for _, q := range r.pastQueries {
-		if q.ih == ih {
-			return true
-		}
-	}
+        for transId, _ := range r.pastQueries.Items() {
+                if p, ok := r.pastQueries.Get(transId); ok {
+                        if p.(*queryType).ih == ih {
+                                return true
+                        }
+                }
+        }
 	return false
 }
 

@@ -215,6 +215,7 @@ func (r *routingTable) resetNeighborhoodBoundary() {
 func (r *routingTable) cleanup(cleanupPeriod time.Duration, p *peerStore) (needPing []*remoteNode) {
 	needPing = make([]*remoteNode, 0, 10)
 	t0 := time.Now()
+	nodeCntStart := len(r.addresses)
 	// Needs some serious optimization.
 	for addr, n := range r.addresses {
 		if addr != n.address.String() {
@@ -227,12 +228,25 @@ func (r *routingTable) cleanup(cleanupPeriod time.Duration, p *peerStore) (needP
 			r.kill(n, p)
 			continue
 		}
-                // kill old and currently unused nodes if nodeCount is > maxNodes
-                if len(r.addresses) > p.maxNodes && time.Since(n.createTime) > cleanupPeriod && len(n.pendingQueries) == 0 {
-                        log.V(4).Infof("DHT: Old node with 0 pendingQueries. Deleting")
-                        r.kill(n, p)
-                        continue
-                }
+		// do a more strict cleanup, if we have more than maxNodes
+		if len(r.addresses) > p.maxNodes {
+			// kill old and currently currently unused nodes
+			if time.Since(n.createTime) > cleanupPeriod && len(n.pendingQueries) == 0 {
+				log.V(4).Infof("DHT: Old node with 0 pendingQueries. Deleting")
+				r.kill(n, p)
+				continue
+			}
+			// kill all nodes older cleanupPeriod*2 if never responded
+			// or last response/search is more than cleanupPeriod
+			if time.Since(n.createTime) > cleanupPeriod*2 && (
+				n.lastResponseTime.IsZero() ||
+				time.Since(n.lastResponseTime) > cleanupPeriod ||
+				time.Since(n.lastSearchTime) > cleanupPeriod) {
+				log.V(4).Infof("DHT: Old node. Deleting")
+				r.kill(n, p)
+				continue
+			}
+		}
 		if n.reachable {
 			if len(n.pendingQueries) == 0 {
 				goto PING
@@ -249,8 +263,8 @@ func (r *routingTable) cleanup(cleanupPeriod time.Duration, p *peerStore) (needP
 			}
 
 		} else {
-			// Not reachable.
-			if len(n.pendingQueries) > maxNodePendingQueries {
+			// Not reachable (never responded)
+			if time.Since(n.lastSearchTime) > cleanupPeriod && len(n.pendingQueries) > maxNodePendingQueries {
 				// Didn't reply to 2 consecutive queries.
 				log.V(4).Infof("DHT: Node never replied to ping. Deleting. %v", n.address)
 				r.kill(n, p)
@@ -264,7 +278,7 @@ func (r *routingTable) cleanup(cleanupPeriod time.Duration, p *peerStore) (needP
 	// If this pauses the server for too long I may have to segment the cleanup.
 	// 2000 nodes: it takes ~12ms
 	// 4000 nodes: ~24ms.
-	log.V(3).Info("DHT: Routing table cleanup took %v", duration)
+	log.V(2).Info("DHT: Routing table cleanup took %v - nodes purged: %d", duration,(nodeCntStart-len(r.addresses)))
 	return needPing
 }
 

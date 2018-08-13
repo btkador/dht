@@ -50,7 +50,7 @@ const (
 	kNodes = 8
 	// Consider a node stale if it has more than this number of oustanding
 	// queries from us.
-	maxNodePendingQueries = 5
+	maxNodePendingQueries = 100
 )
 
 // recursive version of node insertion.

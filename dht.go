@@ -41,6 +41,7 @@ import (
 
 	log "github.com/golang/glog"
 	"github.com/nictuku/nettools"
+	"github.com/oxtoacart/bpool"
 )
 
 // ===== Logging behavior =====
@@ -165,6 +166,7 @@ type DHT struct {
 	routingTable           *routingTable
 	peerStore              *peerStore
 	conn                   *net.UDPConn
+	sndBufPool             *bpool.BufferPool
 	Logger                 Logger
 	exploredNeighborhood   bool
 	remoteNodeAcquaintance chan string
@@ -208,6 +210,7 @@ func New(config *Config) (node *DHT, err error) {
 		portRequest:    make(chan int),
 		clientThrottle: nettools.NewThrottler(cfg.ClientPerMinuteLimit, cfg.ThrottlerTrackedClients),
 		tokenSecrets:   []string{newTokenSecret(), newTokenSecret()},
+		sndBufPool:     bpool.NewBufferPool(1000),
 	}
 	c := openStore(cfg.Port, cfg.SaveRoutingTable)
 	node.store = c
@@ -754,7 +757,7 @@ func (d *DHT) pingNode(r *remoteNode) {
 
 	queryArguments := map[string]interface{}{"id": d.nodeId}
 	query := queryMessage{t, "q", "ping", queryArguments}
-	go sendMsg(d.conn, r.address, query)
+	go sendMsg(d.conn, d.sndBufPool, r.address, query)
 	totalSentPing.Add(1)
 }
 
@@ -785,7 +788,7 @@ func (d *DHT) getPeersFrom(r *remoteNode, ih InfoHash) {
 		log.V(3).Infof("DHT sending get_peers. nodeID: %x@%v, InfoHash: %x , distance: %x", r.id, r.address, ih, x)
 	}
 	r.lastSearchTime = time.Now()
-	go sendMsg(d.conn, r.address, query)
+	go sendMsg(d.conn, d.sndBufPool, r.address, query)
 }
 
 func (d *DHT) findNodeFrom(r *remoteNode, id string) {
@@ -812,7 +815,7 @@ func (d *DHT) findNodeFrom(r *remoteNode, id string) {
 		log.V(3).Infof("DHT sending find_node. nodeID: %x@%v, target ID: %x , distance: %x", r.id, r.address, id, x)
 	}
 	r.lastSearchTime = time.Now()
-	go sendMsg(d.conn, r.address, query)
+	go sendMsg(d.conn, d.sndBufPool, r.address, query)
 }
 
 // announcePeer sends a message to the destination address to advertise that
@@ -834,7 +837,7 @@ func (d *DHT) announcePeer(address net.UDPAddr, ih InfoHash, token string) {
 		"token":     token,
 	}
 	query := queryMessage{transId, "q", ty, queryArguments}
-	go sendMsg(d.conn, address, query)
+	go sendMsg(d.conn, d.sndBufPool, address, query)
 }
 
 func (d *DHT) hostToken(addr net.UDPAddr, secret string) string {
@@ -882,7 +885,7 @@ func (d *DHT) replyAnnouncePeer(addr net.UDPAddr, node *remoteNode, r responseTy
 		Y: "r",
 		R: map[string]interface{}{"id": d.nodeId},
 	}
-	go sendMsg(d.conn, addr, reply)
+	go sendMsg(d.conn, d.sndBufPool, addr, reply)
 }
 
 func (d *DHT) replyGetPeers(addr net.UDPAddr, r responseType) {
@@ -909,7 +912,7 @@ func (d *DHT) replyGetPeers(addr net.UDPAddr, r responseType) {
 	} else {
 		reply.R["nodes"] = d.nodesForInfoHash(ih)
 	}
-	go sendMsg(d.conn, addr, reply)
+	go sendMsg(d.conn, d.sndBufPool, addr, reply)
 }
 
 func (d *DHT) nodesForInfoHash(ih InfoHash) string {
@@ -967,7 +970,7 @@ func (d *DHT) replyFindNode(addr net.UDPAddr, r responseType) {
 	}
 	log.V(3).Infof("replyFindNode: Nodes only. Giving %d", len(n))
 	reply.R["nodes"] = strings.Join(n, "")
-	go sendMsg(d.conn, addr, reply)
+	go sendMsg(d.conn, d.sndBufPool, addr, reply)
 }
 
 func (d *DHT) replyPing(addr net.UDPAddr, response responseType) {
@@ -977,7 +980,7 @@ func (d *DHT) replyPing(addr net.UDPAddr, response responseType) {
 		Y: "r",
 		R: map[string]interface{}{"id": d.nodeId},
 	}
-	go sendMsg(d.conn, addr, reply)
+	go sendMsg(d.conn, d.sndBufPool, addr, reply)
 }
 
 // Process another node's response to a get_peers query. If the response

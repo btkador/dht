@@ -14,6 +14,7 @@ import (
 	bencode "github.com/jackpal/bencode-go"
 	"github.com/nictuku/nettools"
 	"github.com/btkador/dht/lru"
+	"github.com/oxtoacart/bpool"
 )
 
 // Search a node again after some time.
@@ -170,10 +171,11 @@ type responseType struct {
 }
 
 // sendMsg bencodes the data in 'query' and sends it to the remote node.
-func sendMsg(conn *net.UDPConn, raddr net.UDPAddr, query interface{}) {
+func sendMsg(conn *net.UDPConn, sndBufPool *bpool.BufferPool, raddr net.UDPAddr, query interface{}) {
 	totalSent.Add(1)
-	var b bytes.Buffer
-	if err := bencode.Marshal(&b, query); err != nil {
+	b := sndBufPool.Get()
+	if err := bencode.Marshal(b, query); err != nil {
+		sndBufPool.Put(b)
 		return
 	}
 	if n, err := conn.WriteToUDP(b.Bytes(), &raddr); err != nil {
@@ -181,6 +183,7 @@ func sendMsg(conn *net.UDPConn, raddr net.UDPAddr, query interface{}) {
 	} else {
 		totalWrittenBytes.Add(int64(n))
 	}
+	sndBufPool.Put(b)
 	return
 }
 
